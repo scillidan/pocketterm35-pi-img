@@ -1,4 +1,4 @@
-# PocketTerm35 Image
+# PocketTerm35 Pi OS Image
 
 Authors: DeepSeek-V4🧙‍♂️, Kimi-K2.7-Code🧙‍♂️, scillidan🤡
 
