@@ -1,0 +1,7 @@
+*.img
+*.img.xz
+*.zip
+*.dtbo
+*.log
+/tmp/
+pimod-config.sh

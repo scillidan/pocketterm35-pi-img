@@ -1,0 +1,283 @@
+name: Build PocketTerm35 Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_desktop:
+        description: 'Build the desktop edition'
+        required: false
+        type: boolean
+        default: true
+      desktop_url:
+        description: 'Desktop image URL (.img.xz)'
+        required: false
+        type: string
+        default: 'https://downloads.raspberrypi.org/raspios_arm64/images/raspios_arm64-2026-06-19/2026-06-18-raspios-trixie-arm64.img.xz'
+      build_lite:
+        description: 'Build the lite edition'
+        required: false
+        type: boolean
+        default: true
+      lite_url:
+        description: 'Lite image URL (.img.xz)'
+        required: false
+        type: string
+        default: 'https://downloads.raspberrypi.org/raspios_lite_arm64/images/raspios_lite_arm64-2026-06-19/2026-06-18-raspios-trixie-arm64-lite.img.xz'
+      shrink_image:
+        description: 'Shrink image to minimum size (off by default)'
+        required: false
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Override release tag'
+        required: false
+        type: string
+        default: ''
+      create_release:
+        description: 'Create a GitHub release'
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Dry-run: build, skip upload/release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Determine build matrix
+        id: matrix
+        env:
+          BUILD_DESKTOP: ${{ inputs.build_desktop }}
+          BUILD_LITE: ${{ inputs.build_lite }}
+          DESKTOP_URL: ${{ inputs.desktop_url }}
+          LITE_URL: ${{ inputs.lite_url }}
+        run: |
+          os_segment() {
+            local seg
+            seg=$(echo "$1" | grep -oE 'raspios-[a-z0-9]+-arm64' | head -1 || true)
+            echo "${seg:-raspios-bookworm-arm64}"
+          }
+
+          # workflow_dispatch string inputs fall back to their default when left
+          # blank in the UI, so edition selection is driven by explicit booleans.
+          # GitHub requires the top-level strategy.matrix to be an object, so
+          # emit {"include": [...]}.
+          MATRIX='{"include": []}'
+          if [ "$BUILD_DESKTOP" = "true" ] && [ -n "$DESKTOP_URL" ]; then
+            ITEM=$(jq -cn \
+              --arg edition desktop \
+              --arg url "$DESKTOP_URL" \
+              --arg os_segment "$(os_segment "$DESKTOP_URL")" \
+              '{edition: $edition, url: $url, os_segment: $os_segment}')
+            MATRIX=$(jq -c --argjson item "$ITEM" '.include += [$item]' <<<"$MATRIX")
+          fi
+          if [ "$BUILD_LITE" = "true" ] && [ -n "$LITE_URL" ]; then
+            ITEM=$(jq -cn \
+              --arg edition lite \
+              --arg url "$LITE_URL" \
+              --arg os_segment "$(os_segment "$LITE_URL")" \
+              '{edition: $edition, url: $url, os_segment: $os_segment}')
+            MATRIX=$(jq -c --argjson item "$ITEM" '.include += [$item]' <<<"$MATRIX")
+          fi
+
+          if [ "$(jq -r '.include | length' <<<"$MATRIX")" = "0" ]; then
+            echo "ERROR: no build selected — enable at least one of build_desktop / build_lite." >&2
+            exit 1
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Build matrix: $MATRIX"
+
+      - name: Determine release tag
+        id: tag
+        env:
+          BUILD_DESKTOP: ${{ inputs.build_desktop }}
+          DESKTOP_URL: ${{ inputs.desktop_url }}
+          LITE_URL: ${{ inputs.lite_url }}
+          TAG_OVERRIDE: ${{ inputs.release_tag }}
+        run: |
+          URL="$LITE_URL"
+          if [ "$BUILD_DESKTOP" = "true" ]; then
+            URL="$DESKTOP_URL"
+          fi
+          if [ -n "$TAG_OVERRIDE" ]; then
+            TAG="$TAG_OVERRIDE"
+          else
+            DATE=$(echo "$URL" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+            if [ -z "$DATE" ]; then
+              echo "ERROR: could not extract YYYY-MM-DD from image URL: $URL" >&2
+              exit 1
+            fi
+            TAG=$(echo "$DATE" | tr -d '-')
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+  build:
+    name: Build ${{ matrix.edition }}
+    needs: setup
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      EDITION: ${{ matrix.edition }}
+      RASPIOS_URL: ${{ matrix.url }}
+      SHRINK_IMAGE: ${{ inputs.shrink_image }}
+      OUTPUT_IMAGE: pocketterm35-${{ matrix.os_segment }}-${{ matrix.edition }}.img
+      OUTPUT_XZ: pocketterm35-${{ matrix.os_segment }}-${{ matrix.edition }}.img.xz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Generate pimod config
+        run: |
+          {
+            printf 'export EDITION=%q\n' "$EDITION"
+            printf 'export RASPIOS_URL=%q\n' "$RASPIOS_URL"
+            printf 'export SHRINK_IMAGE=%q\n' "$SHRINK_IMAGE"
+            printf 'export OUTPUT_IMAGE=%q\n' "$OUTPUT_IMAGE"
+          } > pimod-config.sh
+
+      - name: Build image with pimod
+        uses: Nature40/pimod@cf1ba51b4228eaddfa37c4ec2440adcd9b1e348e  # master
+        with:
+          pifile: Pifile
+
+      - name: Verify image integrity
+        run: |
+          fdisk -l "$OUTPUT_IMAGE"
+          sudo losetup -fP --show "$OUTPUT_IMAGE" > /tmp/loopdev
+          LOOPDEV=$(cat /tmp/loopdev)
+          # Raspberry Pi OS layout: p1 = boot (FAT), p2 = root (ext4).
+          sudo e2fsck -fn "${LOOPDEV}p2"
+          sudo losetup -d "$LOOPDEV"
+          ls -lh "$OUTPUT_IMAGE"
+
+      - name: Bake display config into boot partition
+        run: |
+          LOOPDEV=$(sudo losetup -fP --show "$OUTPUT_IMAGE")
+          mkdir -p /tmp/imgboot /tmp/imgroot
+          sudo mount "${LOOPDEV}p1" /tmp/imgboot
+          sudo mount -o ro "${LOOPDEV}p2" /tmp/imgroot
+          # pimod's chroot cannot reach the real FAT boot partition, so the
+          # overlay + config.txt changes are baked here, directly on the
+          # mounted partitions. [pi4]/[pi5] conditional filters keep one
+          # image working on both boards without any first-boot step.
+          sudo install -m 0644 /tmp/imgroot/usr/lib/pocketterm35/overlays/*.dtbo /tmp/imgboot/overlays/
+          if ! grep -q 'PocketTerm35 display configuration' /tmp/imgboot/config.txt; then
+            {
+              printf '\n# PocketTerm35 display configuration\n'
+              printf 'dtparam=i2c_arm=on\n'
+              printf '[pi4]\n'
+              printf 'dtoverlay=waveshare-35dpi-4b\n'
+              printf '[pi5]\n'
+              printf 'dtoverlay=waveshare-35dpi-5b\n'
+              printf '[all]\n'
+              printf 'dtoverlay=dwc2,dr_mode=host\n'
+            } | sudo tee -a /tmp/imgboot/config.txt
+          fi
+          sync
+          sudo umount /tmp/imgboot /tmp/imgroot
+          sudo losetup -d "$LOOPDEV"
+
+      - name: 'Debug: inspect baked image contents'
+        run: |
+          LOOPDEV=$(sudo losetup -fP --show "$OUTPUT_IMAGE")
+          mkdir -p /tmp/imgboot /tmp/imgroot
+          sudo mount -o ro "${LOOPDEV}p1" /tmp/imgboot
+          sudo mount -o ro "${LOOPDEV}p2" /tmp/imgroot
+
+          echo '===== boot partition: config.txt ====='
+          sudo cat /tmp/imgboot/config.txt
+
+          echo '===== rootfs: baked waveshare overlays ====='
+          sudo ls -l /tmp/imgroot/usr/lib/pocketterm35/overlays/ || echo 'MISSING: /usr/lib/pocketterm35/overlays'
+
+          echo '===== rootfs: pocketterm35 scripts/services ====='
+          sudo ls -l /tmp/imgroot/usr/local/sbin/pocketterm35-* \
+            /tmp/imgroot/etc/systemd/system/pocketterm35-* 2>&1 || true
+          echo '--- enabled (multi-user.target.wants) ---'
+          sudo ls -l /tmp/imgroot/etc/systemd/system/multi-user.target.wants/ | \
+            grep -i pocketterm || echo 'WARNING: pocketterm35 services NOT enabled'
+
+          echo '===== rootfs: input/touch related packages ====='
+          sudo grep '^Package: ' /tmp/imgroot/var/lib/dpkg/status | \
+            grep -iE 'libinput|evdev|tslib|xinput|xserver-xorg-input|udev' || echo 'none found'
+
+          echo '===== rootfs: kernel modules (input/touch/hid) ====='
+          sudo find /tmp/imgroot/usr/lib/modules -name '*.ko*' 2>/dev/null | \
+            grep -iE 'hid|touch|ads78|xpt|goodix|ft6|edt|usbtouch|ts_' | head -40 || true
+
+          sudo umount /tmp/imgboot /tmp/imgroot
+          sudo losetup -d "$LOOPDEV"
+
+      - name: Compress image
+        run: |
+          # Single-threaded xz on purpose: multithreaded xz (-T0) produces a
+          # multi-block stream that balenaEtcher misreads, failing validation
+          # with "source and destination checksums do not match" / "The writer
+          # process ended unexpectedly" (same as Armbian, balena-io/etcher#4280).
+          xz -9e --stdout "$OUTPUT_IMAGE" > "$OUTPUT_XZ"
+          rm -f "$OUTPUT_IMAGE"
+
+      - name: Upload image artifact
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ${{ env.OUTPUT_XZ }}
+          path: ${{ env.OUTPUT_XZ }}
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    if: inputs.create_release && !inputs.dry_run
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download image artifacts
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e  # v4.2.1
+        with:
+          path: artifacts
+          pattern: pocketterm35-*.img.xz
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          ls -lh artifacts/
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading assets."
+            gh release upload "$TAG" artifacts/*.xz --clobber
+          else
+            gh release create "$TAG" artifacts/*.xz --title "$TAG" --generate-notes
+          fi

@@ -1,0 +1,20 @@
+[Unit]
+Description=PocketTerm35 First Boot Configuration
+Documentation=https://github.com/scillidan/pocketterm35-image
+DefaultDependencies=no
+
+# Wait for the first-boot wizard to create the initial user, then run once.
+After=systemd-remount-fs.service dev-mqueue.mount systemd-tmpfiles-setup.service
+After=rpi-first-boot-wizard.service userconfig.service userconf-pi.service
+After=systemd-user-sessions.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/pocketterm35-firstboot.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

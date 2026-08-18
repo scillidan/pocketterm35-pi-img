@@ -1,0 +1,73 @@
+# Pifile for PocketTerm35 (built by Nature40/pimod). See README.md.
+
+if [ -f pimod-config.sh ]; then
+  source pimod-config.sh
+else
+  EDITION="${EDITION:-desktop}"
+  RASPIOS_URL="${RASPIOS_URL:-https://downloads.raspberrypi.org/raspios_arm64/images/raspios_arm64-2025-05-13/2025-05-13-raspios-bookworm-arm64.img.xz}"
+fi
+
+OS_SEGMENT="${OS_SEGMENT:-$(echo "$RASPIOS_URL" | grep -oE 'raspios-[a-z0-9]+-arm64' | head -n1 || true)}"
+OS_SEGMENT="${OS_SEGMENT:-raspios-bookworm-arm64}"
+
+PUMP_SIZE="${PUMP_SIZE:-$( [ "$EDITION" = "desktop" ] && echo 8G || echo 6G )}"
+OUTPUT_IMAGE="${OUTPUT_IMAGE:-pocketterm35-${OS_SEGMENT}-${EDITION}.img}"
+
+FROM "$RASPIOS_URL"
+TO "$OUTPUT_IMAGE"
+PUMP "$PUMP_SIZE"
+
+RUN bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    curl unzip ca-certificates \
+    whiptail sudo util-linux systemd bluez
+'
+
+# Waveshare 3.5" HDMI DTBOs. Baked into the rootfs, NOT /boot/firmware: pimod
+# only mounts the root partition in its chroot (its `mount -a` is best-effort
+# and errors are swallowed), so files written to /boot/firmware during build
+# land on the rootfs and are shadowed by the real FAT boot partition at
+# runtime. The build workflow mounts the finished image afterwards and copies
+# the DTBOs + config.txt block onto the real boot partition ("Bake display
+# config into boot partition" step); the first-boot script only does it as a
+# fallback and skips when the config is already present.
+RUN bash -c '
+  set -e
+  mkdir -p /usr/lib/pocketterm35/overlays
+  curl -fsSL -o /tmp/3.5hdmi_e_dtbo.zip "https://www.waveshare.net/w/upload/d/d0/3.5HDMI_E_DTBO.zip"
+  unzip -o /tmp/3.5hdmi_e_dtbo.zip -d /tmp/3.5hdmi_e_dtbo/
+  find /tmp/3.5hdmi_e_dtbo/ -type f \( -iname "*.dtbo" -o -iname "*.dtb" \) -exec install -m 0644 {} /usr/lib/pocketterm35/overlays/ \;
+  rm -rf /tmp/3.5hdmi_e_dtbo.zip /tmp/3.5hdmi_e_dtbo/
+'
+
+RUN systemctl enable bluetooth || true
+
+# Refresh packages here (GitHub's network) instead of on the Pi during first boot.
+RUN bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
+'
+
+INSTALL 0644 systemd/pocketterm35-firstboot.service /etc/systemd/system/pocketterm35-firstboot.service
+INSTALL 0755 scripts/pocketterm35-firstboot.sh /usr/local/sbin/pocketterm35-firstboot.sh
+RUN systemctl enable --no-reload pocketterm35-firstboot.service
+
+INSTALL 0644 systemd/pocketterm35-debug.service /etc/systemd/system/pocketterm35-debug.service
+INSTALL 0755 scripts/pocketterm35-debug.sh /usr/local/sbin/pocketterm35-debug.sh
+RUN systemctl enable --no-reload pocketterm35-debug.service
+
+RUN bash -c '
+  apt-get clean
+  rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/archives/*.deb
+'
+
+ZERO
+
+# Shrink is off by default: its sfdisk rewrite can leave the image tail
+# inconsistent and break Etcher; zero-fill already keeps the .xz small.
+if [ "${SHRINK_IMAGE:-false}" = "true" ] && command -v SHRINK >/dev/null 2>&1; then
+  SHRINK
+fi

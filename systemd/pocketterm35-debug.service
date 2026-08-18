@@ -1,0 +1,10 @@
+[Unit]
+Description=PocketTerm35 debug info dump to boot partition
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pocketterm35-debug.sh
+
+[Install]
+WantedBy=multi-user.target
