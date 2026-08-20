@@ -1,5 +1,7 @@
 # PocketTerm35 Pi OS Image
 
+[![Build Images](https://github.com/scillidan/pocketterm35-pi-img/actions/workflows/build.yml/badge.svg)](https://github.com/scillidan/pocketterm35-pi-img/actions/workflows/build.yml)
+
 Authors: DeepSeek-V4🧙‍♂️, Kimi-K2.7-Code🧙‍♂️, scillidan🤡
 
 Raspberry Pi OS 64-bit Desktop / Lite images for the PocketTerm35 handheld, built by GitHub Actions. A single universal image works on both Pi 4 and Pi 5 — the matching Waveshare 3.5" display overlay is baked into the boot partition via `[pi4]` / `[pi5]` config filters. The OS codename is derived from the image URL, so Bookworm and Trixie builds name themselves correctly.
